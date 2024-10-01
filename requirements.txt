@@ -25,3 +25,9 @@ pytorchvideo==0.1.5
 datasets==2.16.1
 openai==1.8.0
 webdataset==0.2.86
+deepspeed==0.13.2
+ninja
+wandb
+mmengine
+word2number
+Levenshtein
