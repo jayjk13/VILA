@@ -17,7 +17,7 @@ RUN bash environment_setup.sh vila
 COPY server.py server.py
 
 CMD conda run -n vila --no-capture-output python -u -W ignore server.py \
-    --model-path ${MODEL_PATH:-Efficient-Large-Model/VILA1.5-40B-AWQ} \
+    --model-path ${MODEL_PATH:-Efficient-Large-Model/VILA1.5-40b-AWQ} \
     --host ${HOST:-0.0.0.0} \
     --port ${PORT:-8000} \
     --conv-mode ${CONV_MODE:-vicuna_v1} \
