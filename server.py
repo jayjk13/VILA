@@ -8,6 +8,8 @@ from contextlib import asynccontextmanager
 from io import BytesIO
 from typing import List, Literal, Optional, Union, get_args
 
+import cv2  # Added for video processing
+import numpy as np
 import requests
 import torch
 import uvicorn
@@ -25,7 +27,13 @@ from llava.constants import (
     IMAGE_TOKEN_INDEX,
 )
 from llava.conversation import SeparatorStyle, conv_templates
-from llava.mm_utils import KeywordsStoppingCriteria, get_model_name_from_path, process_images, tokenizer_image_token
+from llava.mm_utils import (
+    KeywordsStoppingCriteria,
+    get_model_name_from_path,
+    opencv_extract_frames,  # Added for frame extraction
+    process_images,
+    tokenizer_image_token,
+)
 from llava.model.builder import load_pretrained_model
 from llava.utils import disable_torch_init
 
@@ -44,12 +52,26 @@ class ImageContent(BaseModel):
     image_url: ImageURL
 
 
+# Added VideoURL and VideoContent classes
+class VideoURL(BaseModel):
+    url: str
+
+
+class VideoContent(BaseModel):
+    type: Literal["video_url"]
+    video_url: VideoURL
+    num_frames: Optional[int] = 6  # Default number of frames to extract
+
+
 IMAGE_CONTENT_BASE64_REGEX = re.compile(r"^data:image/(png|jpe?g);base64,(.*)$")
+
+# Added VIDEO_CONTENT_BASE64_REGEX for base64-encoded videos
+VIDEO_CONTENT_BASE64_REGEX = re.compile(r"^data:video/(mp4|mov|avi);base64,(.*)$")
 
 
 class ChatMessage(BaseModel):
     role: Literal["user", "assistant"]
-    content: Union[str, List[Union[TextContent, ImageContent]]]
+    content: Union[str, List[Union[TextContent, ImageContent, VideoContent]]]
 
 
 class ChatCompletionRequest(BaseModel):
@@ -94,6 +116,23 @@ def load_image(image_url: str) -> Image:
     return image
 
 
+# Added function to load video and extract frames
+def load_video(video_url: str, num_frames: int = 6) -> List[Image]:
+    if video_url.startswith("http") or video_url.startswith("https"):
+        response = requests.get(video_url)
+        video_bytes = BytesIO(response.content)
+    else:
+        match_results = VIDEO_CONTENT_BASE64_REGEX.match(video_url)
+        if match_results is None:
+            raise ValueError(f"Invalid video url: {video_url}")
+        video_base64 = match_results.groups()[1]
+        video_bytes = BytesIO(base64.b64decode(video_base64))
+
+    # Extract frames using OpenCV
+    frames, _ = opencv_extract_frames(video_bytes, num_frames)
+    return frames
+
+
 def get_literal_values(cls, field_name: str):
     field_type = cls.__annotations__.get(field_name)
     if field_type is None:
@@ -106,7 +145,7 @@ def get_literal_values(cls, field_name: str):
 VILA_MODELS = get_literal_values(ChatCompletionRequest, "model")
 
 
-def normalize_image_tags(qs: str) -> str:
+def normalize_image_tags(qs: str, num_media: int) -> str:
     image_token_se = DEFAULT_IM_START_TOKEN + DEFAULT_IMAGE_TOKEN + DEFAULT_IM_END_TOKEN
     if IMAGE_PLACEHOLDER in qs:
         if model.config.mm_use_im_start_end:
@@ -114,8 +153,15 @@ def normalize_image_tags(qs: str) -> str:
         else:
             qs = re.sub(IMAGE_PLACEHOLDER, DEFAULT_IMAGE_TOKEN, qs)
 
+    else:
+        # Automatically add image tokens if none are present
+        if model.config.mm_use_im_start_end:
+            qs = (image_token_se + "\n") * num_media + qs
+        else:
+            qs = (DEFAULT_IMAGE_TOKEN + "\n") * num_media + qs
+
     if DEFAULT_IMAGE_TOKEN not in qs:
-        print("No image was found in input messages. Continuing with text only prompt.")
+        print("No image/video was found in input messages. Continuing with text-only prompt.")
     return qs
 
 
@@ -159,6 +205,8 @@ async def chat_completions(request: ChatCompletionRequest):
         user_role = conv.roles[0]
         assistant_role = conv.roles[1]
 
+        num_media = 0  # Count of images/videos
+
         for message in messages:
             if message.role == "user":
                 prompt = ""
@@ -169,12 +217,20 @@ async def chat_completions(request: ChatCompletionRequest):
                     for content in message.content:
                         if content.type == "text":
                             prompt += content.text
-                        if content.type == "image_url":
+                        elif content.type == "image_url":
                             image = load_image(content.image_url.url)
                             images.append(image)
+                            num_media += 1
                             prompt += IMAGE_PLACEHOLDER
+                        elif content.type == "video_url":
+                            # Load video and extract frames
+                            num_frames = content.num_frames or 6
+                            frames = load_video(content.video_url.url, num_frames)
+                            images.extend(frames)
+                            num_media += len(frames)
+                            prompt += IMAGE_PLACEHOLDER * len(frames)
 
-                normalized_prompt = normalize_image_tags(prompt)
+                normalized_prompt = normalize_image_tags(prompt, num_media)
                 conv.append_message(user_role, normalized_prompt)
             if message.role == "assistant":
                 prompt = message.content
@@ -183,7 +239,7 @@ async def chat_completions(request: ChatCompletionRequest):
         prompt_text = conv.get_prompt()
         print("Prompt input: ", prompt_text)
 
-        # support generation with text only inputs
+        # Support generation with text-only inputs
         if len(images) == 0:
             images_input = None
         else:
