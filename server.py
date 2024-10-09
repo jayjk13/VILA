@@ -8,7 +8,6 @@ from contextlib import asynccontextmanager
 from io import BytesIO
 from typing import List, Literal, Optional, Union, get_args
 
-import cv2  # Added for video processing
 import numpy as np
 import requests
 import torch
